@@ -36,6 +36,17 @@ ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "utf-16", "cp1252", "latin-1")
 # Separators for the recursive splitter, ordered coarse -> fine.
 SPLIT_SEPARATORS = ("\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", "")
 
+# -- two-column PDF detection -------------------------------------------------
+# Tuned for A4/Letter academic templates, where the gutter is roughly 2% of the
+# page width and sits close to the centre.
+_GUTTER_MIN_WORD = 4        # ignore page numbers, bullets and lone glyphs
+_GUTTER_MIN_WORDS = 40      # too few words -> treat the page as single column
+_GUTTER_MIN_WIDTH = 0.010   # smallest usable gutter, as a fraction of page width
+_GUTTER_SEARCH_LOW = 0.30   # only look for a gutter away from the margins
+_GUTTER_SEARCH_HIGH = 0.72
+_GUTTER_CENTRE_LOW = 0.40   # the gap must be roughly centred to count as a gutter
+_GUTTER_CENTRE_HIGH = 0.62
+
 
 @dataclass(slots=True)
 class Segment:
@@ -54,6 +65,7 @@ class Chunk:
     char_start: int
     char_end: int
     page: int | None = None
+    is_reference: bool = False
 
     def metadata(self) -> dict:
         return {
@@ -62,6 +74,7 @@ class Chunk:
             "char_start": self.char_start,
             "char_end": self.char_end,
             "char_count": len(self.text),
+            "is_reference": self.is_reference,
         }
 
 
@@ -132,6 +145,89 @@ def _extract_pdf(path: Path) -> ExtractionResult:
     )
 
 
+def _detect_column_gutter(page: Any) -> tuple[float, float] | None:
+    """Locate the empty vertical band separating two text columns.
+
+    A two-column academic page has a gutter no glyph crosses. ``extract_text``
+    reads left-to-right *per line*, so on such a page it interleaves the two
+    columns mid-sentence and every downstream stage (chunking, embeddings, the
+    extractive baseline) works on scrambled text. Cropping at the gutter before
+    extraction keeps each column's sentences intact.
+
+    Only body words are considered when building the x-coverage histogram: a
+    page number or a stray glyph sitting in the middle of the gutter would
+    otherwise split it into two slivers and defeat the detection.
+
+    Returns ``(gutter_start, gutter_end)`` in page coordinates, or ``None`` for a
+    single-column page.
+    """
+    try:
+        width = float(page.width)
+        words = [w for w in page.extract_words() if len(w["text"]) >= _GUTTER_MIN_WORD]
+    except Exception as exc:  # noqa: BLE001 - unusual page geometry
+        logger.debug("Column detection failed: %s", exc)
+        return None
+
+    if len(words) < _GUTTER_MIN_WORDS or width <= 0:
+        return None
+
+    bins = int(width)
+    if bins <= 0:
+        return None
+    covered = bytearray(bins)
+    for word in words:
+        start = max(0, int(word["x0"]))
+        end = min(bins, int(word["x1"]))
+        for x in range(start, end):
+            covered[x] = 1
+
+    min_gap = max(3, int(width * _GUTTER_MIN_WIDTH))
+    low = int(width * _GUTTER_SEARCH_LOW)
+    high = min(bins, int(width * _GUTTER_SEARCH_HIGH))
+
+    best_start = -1
+    best_length = 0
+    x = low
+    while x < high:
+        if covered[x]:
+            x += 1
+            continue
+        run = 0
+        while x + run < bins and not covered[x + run]:
+            run += 1
+        if run >= min_gap and run > best_length:
+            best_start, best_length = x, run
+        x += run
+
+    if best_start < 0:
+        return None
+
+    # A real two-column gutter sits near the centre of the page; a wide margin
+    # gap on an otherwise single-column page would not qualify.
+    centre = (best_start + best_length / 2) / width
+    if not _GUTTER_CENTRE_LOW <= centre <= _GUTTER_CENTRE_HIGH:
+        return None
+    return float(best_start), float(best_start + best_length)
+
+
+def _extract_pdfplumber_page(page: Any) -> str:
+    """Read one page, splitting two-column layouts at the detected gutter."""
+    gutter = _detect_column_gutter(page)
+    if gutter is None:
+        return page.extract_text() or ""
+
+    start, end = gutter
+    # Pad slightly outwards so a glyph that only just crosses the gutter is not
+    # truncated mid-word by the crop.
+    left = page.crop((0, 0, start + 1, page.height)).extract_text() or ""
+    right = page.crop((end, 0, page.width, page.height)).extract_text() or ""
+    if not left.strip():
+        return right
+    if not right.strip():
+        return left
+    return f"{left}\n\n{right}"
+
+
 def _extract_pdf_with(backend: str, path: Path) -> list[Segment]:
     if backend == "pdfplumber":
         import pdfplumber  # type: ignore[import-untyped]
@@ -139,7 +235,7 @@ def _extract_pdf_with(backend: str, path: Path) -> list[Segment]:
         segments: list[Segment] = []
         with pdfplumber.open(path) as pdf:
             for number, page in enumerate(pdf.pages, start=1):
-                page_text = page.extract_text() or ""
+                page_text = _extract_pdfplumber_page(page)
                 segments.append(Segment(text=page_text, page=number))
         return segments
 
@@ -487,6 +583,18 @@ def process_file(path: Path, extension: str | None = None) -> ProcessingResult:
             "No usable text was produced after cleaning; the document appears "
             "to contain no indexable content."
         )
+
+    # Flag the bibliography so retrieval can rank it below real prose. Citation
+    # entries repeat a paper's own title, so they look extremely relevant to a
+    # topical query while answering nothing. The chunk *midpoint* decides, not
+    # its start: the heading usually falls inside a chunk, and judging by the
+    # start would leave the chunk that actually contains the first references
+    # unflagged. Nothing is lost - CHUNK_OVERLAP means the prose just before the
+    # heading is still covered by the preceding chunk.
+    reference_start = text_utils.find_reference_start(clean)
+    if reference_start is not None:
+        for chunk in chunks:
+            chunk.is_reference = (chunk.char_start + chunk.char_end) / 2 >= reference_start
 
     return ProcessingResult(
         raw_text=extraction.text,

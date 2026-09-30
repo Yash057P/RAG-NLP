@@ -122,6 +122,31 @@ class TestChat:
         assert body["response_time_ms"] > 0
         assert body["pipeline"]["operation"] == "query"
 
+    def test_pipeline_trace_totals_the_whole_request(self, client: TestClient) -> None:
+        """Regression: the query trace is built after the work is done.
+
+        ``query_trace`` created its recorder once retrieval and generation had
+        already finished, so ``total_duration_ms`` was always ~0ms next to a
+        non-zero retrieval stage. It now reports the measured wall-clock total.
+        """
+        body = client.post(
+            "/api/chat/ask",
+            json={"question": "What does the document say about retrieval?"},
+        ).json()
+
+        pipeline = body["pipeline"]
+        assert pipeline["total_duration_ms"] == pytest.approx(
+            body["response_time_ms"], abs=5.0
+        )
+        assert pipeline["total_duration_ms"] > 0
+        timed = [
+            stage["duration_ms"]
+            for stage in pipeline["stages"]
+            if stage["duration_ms"] is not None
+        ]
+        assert timed, "retrieval and generation must carry timings"
+        assert pipeline["total_duration_ms"] >= sum(timed) - 1.0
+
     def test_abstains_when_corpus_cannot_answer(self, client: TestClient) -> None:
         response = client.post(
             "/api/chat/ask",
@@ -210,3 +235,120 @@ class TestMaintenance:
         remaining = client.get("/api/documents").json()["documents"]
         assert target["id"] not in {doc["id"] for doc in remaining}
         assert "resurrect_me.txt" not in {doc["filename"] for doc in remaining}
+
+
+@pytest.fixture(scope="module")
+def paper_corpus(client: TestClient) -> str:
+    """Upload a document whose only mention of its acronym is its filename.
+
+    The corpus is emptied first so retrieval is deterministic: with the other
+    test documents present, which chunks win a top-5 depends on the embedder,
+    and the offline suite runs a hashed one with no semantic understanding.
+    """
+    for existing in client.get("/api/documents").json()["documents"]:
+        client.delete(f"/api/documents/{existing['id']}")
+
+    body = "".join(
+        f"Section {n} Analysis\n"
+        f"In experiment {n} the sycophancy drift was measured across the "
+        f"assistant's replies, and correction selectivity improved steadily "
+        f"as the classifier gained more evidence from each turn.\n"
+        for n in range(14)
+    )
+    bibliography = (
+        "References\n"
+        + "".join(
+            f"[{n}] A. Author{n}, \"Measuring Sycophancy Drift in Variant {n},\"\n"
+            f"Proceedings of the Conference on Language Testing, 20{10 + n}, "
+            f"pp. {100 + n}-{120 + n}.\n"
+            for n in range(1, 7)
+        )
+    )
+    name, data, mime = _txt_upload("Experiment_5_DAV.txt", body + bibliography)
+    upload = client.post("/api/documents", files=[("files", (name, data, mime))])
+    assert upload.status_code == 201
+    return upload.json()["created"][0]["id"]
+
+
+class TestGroundingQuality:
+    """Behaviour the abstention fix depends on.
+
+    These are the regressions behind three separate false negatives: an acronym
+    that only ever appears in a filename, conversational filler counted as topic
+    terms, and a bibliography that outranked the prose answering the question.
+    """
+
+    def test_acronym_from_the_filename_is_answerable(
+        self, client: TestClient, paper_corpus: str
+    ) -> None:
+        """The filename must reach the coverage gate, not just the embedder.
+
+        The mechanism itself is pinned by the unit tests in test_grounding.py
+        (``TestFilenameIsSearchable``); asserting it end-to-end here would only
+        be measuring the offline hashed embedder, which scores a one-word query
+        below MIN_SIMILARITY. So this checks the observable contract instead:
+        the named document is the one retrieved, and the gate sees the name.
+        """
+        body = client.post(
+            "/api/chat/ask", json={"question": "what is experiment 5 about?"}
+        ).json()
+        assert body["retrieval"]["chunks"], "the named document should be retrieved"
+        assert {c["document_id"] for c in body["retrieval"]["chunks"]} == {paper_corpus}
+        assert body["retrieval"]["grounding_coverage"] >= settings.GROUNDING_THRESHOLD
+
+    def test_stored_chunk_text_stays_verbatim(
+        self, client: TestClient, paper_corpus: str
+    ) -> None:
+        """The title is prepended for the embedder only, never for storage.
+
+        If it leaked into the stored text, every citation and the chunk
+        inspector would show a title line that is not in the document.
+        """
+        chunks = client.get(f"/api/documents/{paper_corpus}/chunks?limit=50").json()
+        assert chunks
+        for chunk in chunks:
+            assert not chunk["text"].lstrip().startswith("Experiment 5 DAV")
+
+    def test_conversational_filler_is_not_counted_as_topic(self, client: TestClient) -> None:
+        """"tell me about X" has one topic term, not four."""
+        verbose = client.post(
+            "/api/chat/ask", json={"question": "tell me about sycophancy drift"}
+        ).json()
+        terse = client.post(
+            "/api/chat/ask", json={"question": "sycophancy drift"}
+        ).json()
+        assert verbose["retrieval"]["grounding_coverage"] >= (
+            terse["retrieval"]["grounding_coverage"] - 0.01
+        )
+
+    def test_bibliography_is_demoted_below_prose(self, client: TestClient) -> None:
+        """Citation entries restate titles, so they match but must not lead."""
+        body = client.post(
+            "/api/chat/ask", json={"question": "sycophancy drift measurement"}
+        ).json()
+        chunks = body["retrieval"]["chunks"]
+        assert chunks
+        reference_chunks = [c for c in chunks if c["is_reference"]]
+        prose_chunks = [c for c in chunks if not c["is_reference"]]
+        assert prose_chunks, "prose must be retrieved"
+        if reference_chunks:
+            best_prose = max(c["score"] for c in prose_chunks)
+            worst_reference = min(c["score"] for c in reference_chunks)
+            assert best_prose > worst_reference
+
+    def test_bibliography_text_is_never_quoted_as_the_answer(self, client: TestClient) -> None:
+        body = client.post(
+            "/api/chat/ask", json={"question": "sycophancy drift measurement"}
+        ).json()
+        # A citation line is dominated by author names, venues and page ranges.
+        assert "Proceedings of the Conference on Language Testing" not in body["answer"]
+        assert "pp." not in body["answer"]
+
+    def test_truly_unrelated_questions_still_abstain(self, client: TestClient) -> None:
+        """The fix must not have turned the gate into a rubber stamp."""
+        body = client.post(
+            "/api/chat/ask",
+            json={"question": "Who won the 1998 FIFA World Cup final in Rio?"},
+        ).json()
+        assert body["grounded"] is False
+        assert "do not contain enough information" in body["answer"]

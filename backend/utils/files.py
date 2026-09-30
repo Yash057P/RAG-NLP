@@ -54,6 +54,27 @@ def split_stored_filename(stored: str) -> tuple[str | None, str]:
     return match.group("doc_id"), match.group("name")
 
 
+def title_context(filename: str) -> str:
+    """Readable title derived from a filename, for title-aware retrieval.
+
+    ``Experiment_5_DAV.docx`` becomes ``Experiment 5 DAV``. Underscores, dashes
+    and camel-case boundaries become spaces so multi-word acronyms survive
+    tokenisation, and the words are repeated so the title is not dominated by a
+    single token in the embedding. Used to prefix the text sent to the
+    embedder; the stored chunk text is left verbatim.
+    """
+    stem = Path(filename).stem
+    # "PaperNLPClassifier" -> "Paper NLP Classifier". The first rule breaks a
+    # lowercase-to-uppercase boundary, the second an acronym off a following
+    # capitalised word ("NLPC" + "lassifier").
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", spaced) if w]
+    if not words:
+        return stem
+    return " ".join(words * 2)
+
+
 def human_size(num_bytes: float) -> str:
     """Format a byte count as e.g. ``1.4 MB``."""
     if num_bytes < 1024:

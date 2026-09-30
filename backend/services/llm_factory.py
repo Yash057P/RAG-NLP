@@ -31,9 +31,21 @@ logger = get_logger(__name__)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 _HEADING_RULE = re.compile(r"[-=_*~]{3,}")
-# A short, unterminated line such as "2. System Architecture" is a heading, not
-# prose - it must not be glued onto the sentence that follows it.
-_HEADING_LINE = re.compile(r"^(?:\d+[.)]\s*|[#*•-]\s*)?[A-Z][\w &/'-]{0,58}$")
+# A short, unterminated line such as "2 System Architecture" is a heading, not
+# prose - it must not be glued onto the sentence that follows it, or the heading
+# gets quoted back as if it were part of the answer. Section numbers appear as
+# "2 Related Work", "2.1 Sycophancy" and "4.1.2 Setup", with or without a
+# trailing dot, so all of those forms are accepted. The 58-character tail keeps
+# ordinary prose from being mistaken for a heading.
+_HEADING_LINE = re.compile(
+    r"^(?:\d+(?:\.\d+)*[.)]?\s+|[#*•-]\s*)?[A-Z][\w &/'-]{0,58}$"
+)
+# "[Source 3] file: Experiment_5_DAV.docx | chunk 2 | page 4" - the label tells
+# the baseline which document a sentence came from, so a question can be matched
+# against the document's identity as well as its prose. "| bibliography" is
+# appended by the retrieval stage for citation lists.
+_SOURCE_HEADER = re.compile(r"^\[Source \d+\]\s*file:\s*(.+?)\s*\|\s*chunk\b")
+_SOURCE_REFERENCE = re.compile(r"\|\s*bibliography\s*$", re.IGNORECASE)
 # Extractive baseline tuning.
 MAX_SENTENCES = 3
 MAX_ANSWER_CHARS = 900
@@ -235,24 +247,53 @@ class ExtractiveLLM:
         return True, "deterministic offline baseline (no API key required)"
 
     @staticmethod
-    def _context_sentences(context: str) -> list[str]:
-        """Pull clean sentences out of the numbered context block."""
-        # Drop the "[Source n] file: x | chunk y" headers and heading rules so
-        # they are not quoted back as if they were prose.
-        context = re.sub(r"\[Source \d+\][^\n]*", " ", context)
-        lines: list[str] = []
+    def _context_sentences(context: str) -> list[tuple[str, str]]:
+        """Pull clean sentences out of the numbered context block.
+
+        Returns ``(sentence, source_label)`` pairs. The label is kept so a
+        question can be matched against the document it came from as well as
+        against the prose: "what is dav?" legitimately selects the document
+        named ``Experiment_5_DAV.docx``, and the label is part of the context
+        the model is shown. The label itself is never quoted back as prose.
+
+        Sources the retrieval stage marked as bibliography are dropped outright.
+        A citation entry restates its own paper's title, so it matches topical
+        questions extremely well while answering none of them - quoting one
+        would produce a fluent, confident, useless answer.
+        """
+        # Per source rather than per line, so a sentence is never labelled with
+        # the wrong document and never merged across a source boundary.
+        sources: list[tuple[str, str]] = []
+        label = ""
+        is_reference = False
+        buffer: list[str] = []
+
+        def flush() -> None:
+            if label and buffer:
+                sources.append((label, " ".join(buffer)))
+            buffer.clear()
+
         for raw in context.split("\n"):
             line = raw.strip()
-            if not line or _HEADING_RULE.fullmatch(line):
+            header = _SOURCE_HEADER.match(line)
+            if header:
+                flush()
+                label = header.group(1) or ""
+                is_reference = bool(_SOURCE_REFERENCE.search(line))
+                continue
+            if is_reference or not line or _HEADING_RULE.fullmatch(line):
                 continue
             # Terminate headings so the following prose starts a new sentence.
-            lines.append(f"{line}." if _HEADING_LINE.match(line) else line)
-        body = " ".join(lines)
-        return [
-            sentence.strip()
-            for sentence in _SENTENCE_SPLIT.split(" ".join(body.split()))
-            if len(sentence.strip()) > 25
-        ]
+            buffer.append(f"{line}." if _HEADING_LINE.match(line) else line)
+        flush()
+
+        sentences: list[tuple[str, str]] = []
+        for source_label, body in sources:
+            for sentence in _SENTENCE_SPLIT.split(body):
+                sentence = sentence.strip()
+                if len(sentence) > 25:
+                    sentences.append((sentence, source_label))
+        return sentences
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         context = user_prompt.split("Context:", 1)[-1].split("Question:", 1)[0]
@@ -262,34 +303,46 @@ class ExtractiveLLM:
         if not question_terms:
             return NO_ANSWER_MESSAGE
 
-        sentences = self._context_sentences(context)
-        if not sentences:
+        labelled = self._context_sentences(context)
+        if not labelled:
             return NO_ANSWER_MESSAGE
 
         # The same fact often appears in several retrieved chunks; keep one
         # representative of each distinct sentence. A longer variant that only
         # adds a leading heading ("System Architecture The objective ...") is
         # treated as the same fact, so containment - not equality - is the test.
-        unique: list[str] = []
+        unique: list[tuple[str, str]] = []
         seen: list[frozenset[str]] = []
-        for sentence in sentences:
+        for sentence, label in labelled:
             tokens = frozenset(tokenize(sentence))
             if not tokens or any(tokens <= existing or existing <= tokens for existing in seen):
                 continue
             seen.append(tokens)
-            unique.append(sentence)
-        sentences = unique
+            unique.append((sentence, label))
+
+        # A body match always outranks a match that only the source label
+        # provided, so a question about a document's subject matter is not
+        # crowded out by the document merely being the right file.
+        label_cache: dict[str, frozenset[str]] = {}
+
+        def label_terms(label: str) -> frozenset[str]:
+            if label not in label_cache:
+                label_cache[label] = frozenset(content_words(label))
+            return label_cache[label]
 
         scored: list[tuple[int, float, str]] = []
-        for position, sentence in enumerate(sentences):
-            terms = content_words(sentence)
-            overlap = sum(1 for term in question_terms if term in terms)
-            if not overlap:
+        for position, (sentence, label) in enumerate(unique):
+            body_terms = content_words(sentence)
+            overlap = sum(1 for term in question_terms if term in body_terms)
+            label_overlap = sum(
+                1 for term in question_terms if term not in body_terms and term in label_terms(label)
+            )
+            if not overlap and not label_overlap:
                 continue
             # Reward coverage of the question's terms and prefer denser, shorter
             # sentences; ties fall back to document order.
-            density = overlap / max(len(terms), 1)
-            scored.append((position, overlap + density, sentence))
+            density = overlap / max(len(body_terms), 1)
+            scored.append((position, overlap + 0.5 * label_overlap + density, sentence))
 
         if not scored:
             return NO_ANSWER_MESSAGE

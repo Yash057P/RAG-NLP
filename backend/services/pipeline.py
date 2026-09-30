@@ -121,6 +121,7 @@ def query_trace(
     generation_ms: float,
     llm_model: str,
     grounded: bool,
+    total_ms: float,
 ) -> PipelineTrace:
     """A query trace where the ingestion stages are shown as already cached."""
     recorder = TraceRecorder(
@@ -147,7 +148,12 @@ def query_trace(
     )
     recorder.trace.stages[0].detail = f"{total_documents} document(s) indexed"
     recorder.trace.stages[5].detail = f"{total_chunks} chunks searchable"
-    return recorder.finish("success")
+    trace = recorder.finish("success")
+    # This recorder is built *after* retrieval and generation have already run,
+    # so its own elapsed time is meaningless. The caller measures the real
+    # wall-clock total and hands it in instead.
+    trace.total_duration_ms = round(total_ms, 2)
+    return trace
 
 
 def _now():

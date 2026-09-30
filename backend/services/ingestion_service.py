@@ -38,6 +38,7 @@ from backend.utils.files import (
     human_size,
     safe_filename,
     split_stored_filename,
+    title_context,
 )
 
 logger = get_logger(__name__)
@@ -180,6 +181,13 @@ def ingest_one(
     embedder = get_embedder()
     record.embedding_model = embedder.name
     chunk_texts = [chunk.text for chunk in chunks]
+    # A document's filename is part of its identity: someone who uploads
+    # "Experiment_5_DAV.docx" and then asks "what is dav?" means that file. The
+    # stem is prepended to the text that gets *embedded* only - the stored text
+    # stays verbatim so citations and the chunk inspector keep showing the real
+    # content. The filename is already shown to the LLM by the context block,
+    # so this also makes retrieval and the grounding gate agree.
+    embed_texts = [f"{title_context(filename)}\n\n{text}" for text in chunk_texts]
     metadatas: list[dict[str, Any]] = []
     ids: list[str] = []
     for chunk in chunks:
@@ -190,6 +198,7 @@ def ingest_one(
             "extension": extension,
             "chunk_index": chunk.index,
             "char_count": len(chunk.text),
+            "is_reference": chunk.is_reference,
         }
         # ChromaDB only stores str/int/float/bool metadata, so an unknown page
         # is omitted rather than written as None.
@@ -205,8 +214,8 @@ def ingest_one(
         started = time.perf_counter()
         vectors: list[list[float]] = []
         batch = max(settings.EMBEDDING_BATCH_SIZE, 1)
-        for offset in range(0, len(chunk_texts), batch):
-            vectors.extend(embedder.embed_documents(chunk_texts[offset : offset + batch]))
+        for offset in range(0, len(embed_texts), batch):
+            vectors.extend(embedder.embed_documents(embed_texts[offset : offset + batch]))
         embedding_ms = (time.perf_counter() - started) * 1000
 
         recorder.mark(

@@ -117,12 +117,37 @@ Stages 1-6 run once per document (ingestion); stages 7-8 run per question (query
 returns a `PipelineTrace` with per-stage status, duration and metrics, which is exactly what
 the pipeline diagram in the UI renders.
 
+### Reading real-world documents
+
+Three things a naive extraction gets wrong on actual documents, all fixed and all covered by
+tests:
+
+| Problem | What it did | Fix |
+| --- | --- | --- |
+| Two-column PDFs | `extract_text()` reads left-to-right *per line*, interleaving both columns mid-sentence and scrambling every downstream stage | Detect the empty gutter and crop into it, so each column is read top-to-bottom. Sentences in a real paper went from 77 garbled to 183 coherent |
+| Acronyms in filenames | "what is dav?" scored **0%** coverage, because `DAV` appears in `Experiment_5_DAV.docx` but nowhere in the indexed text | Prepend a normalised form of the filename to the text sent to the *embedder* (stored text stays verbatim) and count the filename in the grounding gate |
+| Conversation filler | "tell me about mathematics" was scored on 4 terms when it has 1 topic term, pushing real answers below the threshold | Treat request verbs ("tell", "explain", "about", "me") as stopwords |
+
+### Bibliographies are demoted, not deleted
+
+A citation entry restates its paper's own title, so it is lexically dense with exactly the
+topic words a user asks about — a similarity search ranks it *above* the prose that answers the
+question. `find_reference_start` locates the bibliography structurally (a `References` heading
+followed by text that actually looks like citation entries, which measured 0.00 entries/line
+for body text against 0.22 for a real bibliography), and those chunks are scaled by
+`REFERENCE_SCORE_PENALTY` at retrieval. They stay visible and are labelled `bibliography` in
+the UI; the same label is passed to the LLM so no provider quotes one as an answer.
+
 ### Grounding gate
 
 Before the LLM is called, the service measures how much of the question is actually covered by
 the retrieved context (`term_coverage`). Below `GROUNDING_THRESHOLD` the model is asked to
 abstain and the confidence score is halved — this is what keeps the system from inventing
 answers.
+
+Coverage is measured against the same text the model is shown, source labels included, so
+retrieval and the gate cannot disagree: a document named `Experiment_5_DAV.docx` legitimately
+answers "what is dav?", and a question with no bearing on the corpus is still refused.
 
 ### Confidence score
 
@@ -153,7 +178,7 @@ used for the `High / Moderate / Low` label.
 │   │                           llm_factory · pipeline · registry · ingestion_service
 │   │                           analytics · rag_service
 │   ├── utils/                  files (validation, fingerprints) · text (cleaning)
-│   └── tests/                  27 tests, forced to run fully offline
+│   └── tests/                  83 tests, forced to run fully offline
 ├── frontend/
 │   └── src/
 │       ├── App.tsx             3-column shell, chat state, polling
@@ -163,6 +188,7 @@ used for the `High / Moderate / Low` label.
 │       └── types/api.ts        TypeScript mirror of the Pydantic schemas
 ├── samples/                    3 generated demo documents (PDF, DOCX, TXT)
 ├── scripts/                    generate_samples.py · verify_stack.py
+│                               build_program_doc.py (lab report)
 ├── uploads/                    original uploaded files (runtime)
 ├── vector_store/               persisted ChromaDB collection (runtime)
 └── data/                       document registry + chat history (runtime)
@@ -201,7 +227,7 @@ curl -X POST http://127.0.0.1:8000/api/chat/ask \
 ## 🧪 Tests & checks
 
 ```bash
-pytest backend/tests -q          # 27 tests, no network required
+pytest backend/tests -q          # 83 tests, no network required
 python scripts/verify_stack.py   # end-to-end smoke test on the REAL stack
                                   # (real MiniLM + real ChromaDB + the 3 samples)
 ```

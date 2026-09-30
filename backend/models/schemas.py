@@ -124,6 +124,10 @@ class RetrievedChunk(BaseModel):
     char_start: int | None = None
     char_end: int | None = None
     token_estimate: int = 0
+    is_reference: bool = Field(
+        default=False,
+        description="True for bibliography entries; their score is demoted at retrieval",
+    )
 
 
 class RetrievalResult(BaseModel):

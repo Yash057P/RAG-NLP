@@ -39,11 +39,23 @@ _HYPHEN_BREAK = re.compile(r"(\w)-\n(\w)")
 _PAGE_MARKER = re.compile(r"^\s*(?:page\s+)?\d+\s*(?:of|/)\s*\d+\s*$", re.IGNORECASE)
 _RULE_LINE = re.compile(r"^\s*[-=_*~]{3,}\s*$")
 _CONTROLLED_VOCAB = {
+    # Closed-class function words.
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "do", "does", "for",
     "from", "had", "has", "have", "how", "in", "into", "is", "it", "its", "of",
     "on", "or", "that", "the", "their", "then", "there", "these", "this", "to",
     "was", "were", "what", "when", "where", "which", "who", "why", "will",
     "with", "you", "your",
+    # Conversational filler and request verbs. These carry no topic information,
+    # so leaving them in the denominator penalises natural phrasings: "tell me
+    # about mathematics" has one real topic term, but scored as four.
+    "about", "also", "am", "any", "briefly", "brief", "can", "could", "could",
+    "detail", "details", "describe", "did", "do", "explain", "explaination",
+    "give", "hello", "hey", "hi", "i", "if", "im", "info", "information", "is",
+    "kind", "know", "like", "looking", "may", "me", "mine", "much", "my",
+    "need", "of", "please", "question", "regarding", "relate", "related",
+    "say", "should", "simple", "so", "some", "something", "summarise",
+    "summarize", "summary", "tell", "thanks", "thank", "understand", "us",
+    "want", "well", "would",
 }
 
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
@@ -114,6 +126,57 @@ def drop_repeated_lines(text: str, min_occurrences: int = 4) -> str:
         line for line in text.split("\n") if line.strip() not in boilerplate or not line.strip()
     ]
     return "\n".join(kept)
+
+
+# A bibliography is introduced by a bare "References" / "Bibliography" heading.
+# Matching the heading on its own line avoids firing on sentences that merely
+# mention the word, e.g. "we follow the references given in Appendix A".
+_REFERENCE_HEADING = re.compile(
+    r"^[ \t]*(?:\d+(?:\.\d+)*[.)]?[ \t]*)?"
+    r"(references?|bibliography|works cited|literature cited)"
+    r"[ \t]*:?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# An entry opens with its numeric marker: "[12] A. Author, ...". Some styles drop
+# the bracket, so a leading "arXiv:" id or a DOI also counts.
+_CITATION_ENTRY = re.compile(r"^(?:\[\d+\]|arXiv:|https?://|doi:)", re.IGNORECASE)
+# Share of lines after the heading that must look like citation entries. The
+# entries of a wrapped, two-column bibliography span several lines each, so
+# measured against a real paper the body scores 0.00 and the bibliography 0.22;
+# 0.15 sits in that gap with room on both sides.
+_CITATION_LIST_RATIO = 0.15
+
+
+def find_reference_start(text: str) -> int | None:
+    """Offset where a document's bibliography begins, or ``None``.
+
+    Everything from this offset on is a list of citations. Those entries are
+    lexically dense with the very terms a user asks about - a paper's title
+    repeats its own topic words - so a similarity search ranks them above the
+    prose that actually answers the question.
+
+    The heading is only trusted when the text below it looks like a citation
+    list, which keeps a stray "References" line in the middle of a document from
+    hiding its real content.
+    """
+    matches = list(_REFERENCE_HEADING.finditer(text))
+    if not matches:
+        return None
+
+    # Take the last plausible heading: some papers mention references early on.
+    for match in reversed(matches):
+        if _looks_like_citation_list(text[match.end() :]):
+            return match.start()
+    return None
+
+
+def _looks_like_citation_list(text: str, sample_lines: int = 40) -> bool:
+    """True when enough of the first lines of ``text`` are citation entries."""
+    lines = [line for line in text.split("\n") if line.strip()][:sample_lines]
+    if len(lines) < 3:
+        return False
+    entries = sum(1 for line in lines if _CITATION_ENTRY.match(line.strip()))
+    return entries / len(lines) >= _CITATION_LIST_RATIO
 
 
 def clean_text(text: str, boilerplate: set[str] | None = None) -> str:

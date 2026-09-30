@@ -48,3 +48,5 @@ numpy>=1.26                      # vector maths + built-in fallback index
 
 # --- Development -----------------------------------------------------------
 pytest>=8.0
+# Used only to synthesise two-column PDFs in the column-detection tests.
+reportlab>=4.0

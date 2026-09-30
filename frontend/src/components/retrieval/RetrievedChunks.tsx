@@ -97,6 +97,15 @@ function ChunkItem({ chunk, rank, query }: { chunk: RetrievedChunk; rank: number
                 p.{chunk.page}
               </Badge>
             ) : null}
+            {chunk.is_reference ? (
+              <Badge
+                variant="outline"
+                title="Citation list - ranked below prose because a paper's own title repeats the topic terms, but it answers nothing."
+                className="shrink-0 px-1.5 py-0 text-[9.5px] text-amber-600 dark:text-amber-400"
+              >
+                bibliography
+              </Badge>
+            ) : null}
           </span>
           <span className="mt-1 flex items-center gap-2">
             <span className="h-1 flex-1 overflow-hidden rounded-full bg-muted">

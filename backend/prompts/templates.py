@@ -21,7 +21,7 @@ Question:
 
 Answer:"""
 
-CONTEXT_BLOCK_TEMPLATE = """[Source {index}] file: {filename} | chunk {chunk_index}{page}
+CONTEXT_BLOCK_TEMPLATE = """[Source {index}] file: {filename} | chunk {chunk_index}{flags}
 {text}"""
 
 USER_PROMPT_TEMPLATE = """You are a document assistant.

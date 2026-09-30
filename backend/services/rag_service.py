@@ -61,6 +61,14 @@ def estimate_tokens(text: str) -> int:
 def _to_retrieved(chunk: ScoredChunk) -> RetrievedChunk:
     metadata = chunk.metadata
     page = metadata.get("page")
+    is_reference = bool(metadata.get("is_reference", False))
+    # Bibliography entries are lexically dense with topic terms, so they crowd
+    # out the prose that actually answers the question. Scaling their score
+    # pushes them down the ranking while keeping them available as context, and
+    # the flag lets the UI label them.
+    score = float(chunk.score)
+    if is_reference:
+        score *= settings.REFERENCE_SCORE_PENALTY
     return RetrievedChunk(
         id=chunk.id or f"{metadata.get('document_id', '')}::{metadata.get('chunk_index', 0)}",
         document_id=str(metadata.get("document_id", "")),
@@ -68,30 +76,54 @@ def _to_retrieved(chunk: ScoredChunk) -> RetrievedChunk:
         chunk_index=int(metadata.get("chunk_index", 0)),
         text=chunk.text,
         snippet=truncate(" ".join(chunk.text.split()), 260),
-        score=round(float(chunk.score), 4),
+        score=round(score, 4),
         distance=round(float(chunk.distance), 4),
         page=int(page) if isinstance(page, int) else None,
         char_start=metadata.get("char_start"),
         char_end=metadata.get("char_end"),
         token_estimate=estimate_tokens(chunk.text),
+        is_reference=is_reference,
     )
 
 
 def build_context(chunks: list[RetrievedChunk]) -> str:
-    """Render the retrieved chunks as a numbered, citable context block."""
+    """Render the retrieved chunks as a numbered, citable context block.
+
+    Bibliography entries are labelled so the model knows they are citation
+    strings rather than prose. Without the label a model will happily quote a
+    reference as though it were the answer, because a paper's own title repeats
+    the topic terms the user asked about.
+    """
     blocks: list[str] = []
     for position, chunk in enumerate(chunks, start=1):
-        page = f" | page {chunk.page}" if chunk.page else ""
+        flags = f" | page {chunk.page}" if chunk.page else ""
+        if chunk.is_reference:
+            flags = f"{flags} | bibliography" if flags else " | bibliography"
         blocks.append(
             CONTEXT_BLOCK_TEMPLATE.format(
                 index=position,
                 filename=chunk.filename,
                 chunk_index=chunk.chunk_index,
-                page=page,
+                flags=flags,
                 text=chunk.text.strip(),
             )
         )
     return "\n\n".join(blocks)
+
+
+def coverage_text(chunks: list[RetrievedChunk]) -> str:
+    """Text the grounding gate measures against.
+
+    This is the text the model actually reads, so it must include the source
+    labels - a question like "what is dav?" is legitimately answered by a
+    document named ``Experiment_5_DAV.docx``, and the context block already
+    shows the model that filename. Measuring coverage on chunk bodies alone
+    would reject the very match retrieval just found.
+    """
+    return " ".join(
+        f"{chunk.filename} {chunk.page if chunk.page else ''} {chunk.text}".strip()
+        for chunk in chunks
+    )
 
 
 def build_prompt(question: str, chunks: list[RetrievedChunk]) -> tuple[str, str]:
@@ -120,7 +152,7 @@ def score_confidence(
     rest = [chunk.score for chunk in chunks[1:]]
     margin = top_score - (sum(rest) / len(rest) if rest else 0.0)
 
-    context_text = " ".join(chunk.text for chunk in chunks)
+    context_text = coverage_text(chunks)
     coverage = term_coverage(question, context_text)
 
     components = {
@@ -192,11 +224,17 @@ class RAGService:
         embedding_ms = (time.perf_counter() - started_embed) * 1000
 
         started_search = time.perf_counter()
-        raw_chunks = self.store.query(query_vector, top_k)
+        # Over-fetch, because demoting a bibliography chunk should let the prose
+        # that the store ranked just below the cut take its place. Trimming to
+        # top_k afterwards keeps the returned set the same size either way.
+        candidates = top_k * settings.RETRIEVAL_CANDIDATE_MULTIPLIER
+        raw_chunks = self.store.query(query_vector, candidates)
         search_ms = (time.perf_counter() - started_search) * 1000
 
         chunks = [_to_retrieved(chunk) for chunk in raw_chunks]
         chunks = [chunk for chunk in chunks if chunk.score >= settings.MIN_SIMILARITY]
+        chunks.sort(key=lambda chunk: chunk.score, reverse=True)
+        chunks = chunks[:top_k]
         total_ms = (time.perf_counter() - started) * 1000
 
         scores = [chunk.score for chunk in chunks]
@@ -204,7 +242,7 @@ class RAGService:
             query=question,
             chunks=chunks,
             top_k=top_k,
-            total_candidates=self.store.count(),
+            total_candidates=len(raw_chunks),
             top_score=round(max(scores), 4) if scores else 0.0,
             average_score=round(sum(scores) / len(scores), 4) if scores else 0.0,
             grounding_coverage=0.0,
@@ -222,7 +260,7 @@ class RAGService:
         answer_id = generate_id("qa_")
 
         retrieval = self.retrieve(question, top_k)
-        context_text = " ".join(chunk.text for chunk in retrieval.chunks)
+        context_text = coverage_text(retrieval.chunks)
         coverage = term_coverage(question, context_text) if context_text else 0.0
         retrieval.grounding_coverage = round(coverage, 4)
 
@@ -299,6 +337,7 @@ class RAGService:
                 generation_ms=round(generation_ms, 2),
                 llm_model=llm_model,
                 grounded=grounded,
+                total_ms=response_time_ms,
             ),
             response_time_ms=round(response_time_ms, 2),
         )

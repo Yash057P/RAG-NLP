@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     # Fraction of question terms that must appear in the retrieved context
     # before the LLM is allowed to answer instead of abstaining.
     GROUNDING_THRESHOLD: float = 0.18
+    # Bibliography chunks are scaled by this before ranking. A citation entry
+    # repeats its own paper's title, so it scores very high on topical queries
+    # while containing nothing that answers them; demoting it lets real prose
+    # win without hiding the entry from the results entirely.
+    REFERENCE_SCORE_PENALTY: float = 0.35
+    # How many times top_k the store is asked for, so demoted bibliography
+    # chunks can be replaced by real prose ranked just below the cut.
+    RETRIEVAL_CANDIDATE_MULTIPLIER: int = 4
 
     # ------------------------------------------------------------------ llm
     LLM_PROVIDER: LLMProvider = "auto"

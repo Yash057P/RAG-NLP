@@ -99,6 +99,7 @@ export interface RetrievedChunk {
   char_start: number | null;
   char_end: number | null;
   token_estimate: number;
+  is_reference: boolean;
 }
 
 export interface RetrievalResult {
