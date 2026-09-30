@@ -1,0 +1,344 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 2775 >>
+stream
+BT
+1 0 0 1 54 740 Tm
+/F1 11 Tf
+14 TL
+/F1 18 Tf
+(Retrieval Augmented Generation for Document Question Answering) Tj
+T*
+/F1 10 Tf
+(NLP Lab Experiment Report) Tj
+T*
+T*
+/F1 14 Tf
+(Abstract) Tj
+T*
+/F1 11 Tf
+(This report documents a laboratory experiment that implements a Retrieval Augmented) Tj
+T*
+/F1 11 Tf
+(Generation \(RAG\) system. The system answers natural language questions using only the) Tj
+T*
+/F1 11 Tf
+(documents a user uploads, and every answer is accompanied by a citation pointing back to) Tj
+T*
+/F1 11 Tf
+(the exact passage it was generated from.) Tj
+T*
+/F1 11 Tf
+(The experiment covers the full pipeline: text extraction, cleaning, chunking, embedding) Tj
+T*
+/F1 11 Tf
+(generation, vector storage, similarity retrieval and grounded answer generation.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(1. Objective) Tj
+T*
+/F1 11 Tf
+(The objective of the experiment is to build a question answering system that can answer) Tj
+T*
+/F1 11 Tf
+(questions about a personal document collection without any prior fine-tuning of a) Tj
+T*
+/F1 11 Tf
+(language model.) Tj
+T*
+/F1 11 Tf
+(A secondary objective is to verify that answers are grounded: the system must refuse to) Tj
+T*
+/F1 11 Tf
+(answer when the retrieved context does not support an answer, rather than hallucinating) Tj
+T*
+/F1 11 Tf
+(one.) Tj
+T*
+/F1 11 Tf
+(The objective of the experiment is therefore twofold: demonstrate the mechanics of) Tj
+T*
+/F1 11 Tf
+(retrieval augmented generation, and demonstrate that its outputs are traceable to their) Tj
+T*
+/F1 11 Tf
+(sources.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(2. System Architecture) Tj
+T*
+/F1 11 Tf
+(The architecture has six stages. First the uploaded file is parsed into plain text. The) Tj
+T*
+/F1 11 Tf
+(text is then cleaned to remove repeated page headers, fix hyphenation and normalise) Tj
+T*
+/F1 11 Tf
+(whitespace.) Tj
+T*
+/F1 11 Tf
+(The cleaned text is split into chunks of 500 characters with an overlap of 100) Tj
+T*
+/F1 11 Tf
+(characters. The overlap exists so that a sentence straddling a chunk boundary is still) Tj
+T*
+/F1 11 Tf
+(fully contained in one chunk.) Tj
+T*
+/F1 11 Tf
+(Each chunk is encoded into a 384 dimensional vector. The vectors are stored in a) Tj
+T*
+/F1 11 Tf
+(ChromaDB collection configured for cosine similarity.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(3. Embeddings) Tj
+T*
+/F1 11 Tf
+(The embedding model is sentence-transformers/all-MiniLM-L6-v2. It is a small bi-encoder) Tj
+T*
+/F1 11 Tf
+(that maps a chunk of text into a dense vector of 384 dimensions, and it is chosen) Tj
+T*
+/F1 11 Tf
+(because it is fast on CPU while still capturing semantic similarity well enough for) Tj
+T*
+/F1 11 Tf
+(passage retrieval.) Tj
+T*
+/F1 11 Tf
+(The same model embeds the user's question, which makes query and document vectors) Tj
+T*
+/F1 11 Tf
+(directly comparable with a cosine similarity.) Tj
+T*
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 2903 >>
+stream
+BT
+1 0 0 1 54 740 Tm
+/F1 11 Tf
+14 TL
+T*
+/F1 14 Tf
+(4. Chunking Strategy) Tj
+T*
+/F1 11 Tf
+(The chunking strategy uses 500 character chunks with an overlap of 100 characters. A) Tj
+T*
+/F1 11 Tf
+(chunk size of 500 characters keeps enough context for a meaningful passage while staying) Tj
+T*
+/F1 11 Tf
+(small enough that the embedding is not diluted by unrelated text.) Tj
+T*
+/F1 11 Tf
+(The overlap of 100 characters is roughly one fifth of a chunk. This prevents a fact that) Tj
+T*
+/F1 11 Tf
+(falls exactly on a boundary from being split across two chunks, where neither half would) Tj
+T*
+/F1 11 Tf
+(retrieve it well.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(5. Vector Database) Tj
+T*
+/F1 11 Tf
+(The vector database used for storage is ChromaDB. It persists an HNSW index on disk,) Tj
+T*
+/F1 11 Tf
+(which makes cosine similarity search fast even as the collection grows, and it keeps the) Tj
+T*
+/F1 11 Tf
+(collection metadata alongside each vector so that citations can be resolved.) Tj
+T*
+/F1 11 Tf
+(Each vector carries metadata recording the source file name, the chunk number and the) Tj
+T*
+/F1 11 Tf
+(page number. This is what makes it possible to show the user exactly which passage) Tj
+T*
+/F1 11 Tf
+(produced an answer.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(6. Retrieval) Tj
+T*
+/F1 11 Tf
+(Retrieval works by embedding the question with the same model used for the documents,) Tj
+T*
+/F1 11 Tf
+(then performing a similarity search that returns the top 5 chunks ranked by cosine) Tj
+T*
+/F1 11 Tf
+(similarity.) Tj
+T*
+/F1 11 Tf
+(A similarity score close to 1 means the chunk means almost the same thing as the) Tj
+T*
+/F1 11 Tf
+(question, while a score near 0 means the two are unrelated. The interface displays these) Tj
+T*
+/F1 11 Tf
+(scores so retrieval quality can be inspected directly.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(7. Answer Generation) Tj
+T*
+/F1 11 Tf
+(Answer generation sends the retrieved context and the question to a large language) Tj
+T*
+/F1 11 Tf
+(model. The prompt instructs the model to answer only from the provided context and to) Tj
+T*
+/F1 11 Tf
+(reply that the documents do not contain enough information when the context is) Tj
+T*
+/F1 11 Tf
+(insufficient.) Tj
+T*
+/F1 11 Tf
+(Because generation is conditioned on retrieved text, the system cannot invent facts) Tj
+T*
+/F1 11 Tf
+(about documents it has never seen. The cost of this design is that answer quality is) Tj
+T*
+/F1 11 Tf
+(bounded by retrieval quality.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(8. Advantages of RAG) Tj
+T*
+/F1 11 Tf
+(The advantages of RAG include grounded answers that can be traced to a source, knowledge) Tj
+T*
+/F1 11 Tf
+(that can be updated by editing documents rather than retraining a model, and) Tj
+T*
+/F1 11 Tf
+(transparency because the retrieved passages can be shown to the user.) Tj
+T*
+/F1 11 Tf
+(RAG also reduces hallucination compared with asking a model directly, since the model is) Tj
+T*
+/F1 11 Tf
+(instructed to rely on the supplied context.) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 1259 >>
+stream
+BT
+1 0 0 1 54 740 Tm
+/F1 11 Tf
+14 TL
+T*
+T*
+/F1 14 Tf
+(9. Limitations) Tj
+T*
+/F1 11 Tf
+(A limitation of the system is that retrieval quality depends heavily on the chunk size:) Tj
+T*
+/F1 11 Tf
+(chunks that are too small lose context, while chunks that are too large dilute the) Tj
+T*
+/F1 11 Tf
+(signal and reduce precision.) Tj
+T*
+/F1 11 Tf
+(Another limitation is that the system performs lexical and semantic matching only. It) Tj
+T*
+/F1 11 Tf
+(cannot answer questions that require arithmetic over the documents, or reasoning that) Tj
+T*
+/F1 11 Tf
+(spans many chunks at once.) Tj
+T*
+/F1 11 Tf
+(Finally, scanned PDFs without a text layer cannot be processed because optical character) Tj
+T*
+/F1 11 Tf
+(recognition is out of scope for this experiment.) Tj
+T*
+T*
+T*
+/F1 14 Tf
+(10. Conclusion) Tj
+T*
+/F1 11 Tf
+(The experiment demonstrates that a complete retrieval augmented generation workflow can) Tj
+T*
+/F1 11 Tf
+(be built from standard open source components and run locally on a laptop CPU.) Tj
+T*
+/F1 11 Tf
+(The key takeaways are that grounding depends on retrieval, that citations make the) Tj
+T*
+/F1 11 Tf
+(system auditable, and that abstaining is a feature rather than a failure when the corpus) Tj
+T*
+/F1 11 Tf
+(does not cover the question.) Tj
+T*
+T*
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000133 00000 n 
+0000000203 00000 n 
+0000003030 00000 n 
+0000003156 00000 n 
+0000006111 00000 n 
+0000006237 00000 n 
+0000007548 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+7674
+%%EOF
